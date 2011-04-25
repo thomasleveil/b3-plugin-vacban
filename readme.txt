@@ -26,7 +26,12 @@ Installation
 Changelog
 ---------
 
+2011-04-25 - 0.1
+* first release
+
+
 
 Support
 -------
 
+http://forum.bigbrotherbot.net/plugins-by-courgette/vac-ban-plugin
