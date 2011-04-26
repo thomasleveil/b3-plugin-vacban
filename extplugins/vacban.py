@@ -20,19 +20,20 @@
 #
 # 2011-04-25 - 0.1
 # * first release
+# 2011-04-26 - 0.2
+# * fix issue when on client auth event
+#
 
-
-__version__ = '0.1'
+__version__ = '0.2'
 __author__  = 'Courgette'
 
 
-import string, time
+import time
 import threading, Queue
-import urllib, urllib2 
+import urllib2 
 
-import b3
-import b3.events
 import b3.plugin
+from b3.events import EVT_CLIENT_AUTH
 
 from xml.parsers.expat import ExpatError
 try:
@@ -89,7 +90,7 @@ class VacbanPlugin(b3.plugin.Plugin):
 
 
     def onStartup(self):
-        self.registerEvent(b3.events.EVT_CLIENT_AUTH)
+        self.registerEvent(EVT_CLIENT_AUTH)
 
         self._workerThread = threading.Thread(target=self._worker)
         self._workerThread.setDaemon(True)
@@ -99,8 +100,8 @@ class VacbanPlugin(b3.plugin.Plugin):
 
 
     def onEvent(self, event):
-        if event.type == b3.events.EVT_CLIENT_AUTH:
-            thread.start_new_thread(self._checkClient, (event.client,))
+        if event.type == EVT_CLIENT_AUTH:
+            self._checkqueue.put(event.client)
 
 
     def _getCmd(self, cmd):
@@ -181,7 +182,7 @@ class VacbanPlugin(b3.plugin.Plugin):
         try:
             msg = self.getMessage('ban_message', b3.parser.Parser.getMessageVariables(self.console, client=client))
             if msg and msg!="":
-              self._message_method(msg)
+                self._message_method(msg)
         except b3.config.ConfigParser.NoOptionError, err:
             self.warning("could not find message ban_message in config file")
         
@@ -237,8 +238,11 @@ if __name__ == '__main__':
     
     def test_checkClient():
         p = VacbanPlugin(fakeConsole, conf1)
+        p.onStartup()
         joe._guid = "76561197976827962"
+        time.sleep(5)
         print(p._checkClient(joe))
+        time.sleep(10)
         
     
     def test_lots_of_clients():
@@ -250,6 +254,7 @@ if __name__ == '__main__':
             client = FakeClient(fakeConsole, guid='someguid-%s'%i, name='name-%s'%i, authed=True)
             players.append(client)
             client.connects(i)
+            time.sleep(2)
             
         client._guid = "76561197976827962"
         print("-----------------------------------------")
@@ -257,10 +262,19 @@ if __name__ == '__main__':
         p.cmd_vaccheck(client=moderator)
         
         time.sleep(60)
+    
         
+    def test_client_auth():
+        p = VacbanPlugin(fakeConsole, conf1)
+        p.onStartup()
+        joe._guid = "76561197976827962"
+        time.sleep(3)
+        print('- * '*20)
+        joe.connects(2)
+        time.sleep(10)
         
     #testCommand()
     #test_query()
-    test_checkClient()
+    #test_checkClient()
     #test_lots_of_clients()
-    
+    test_client_auth()
