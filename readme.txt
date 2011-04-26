@@ -28,7 +28,10 @@ Changelog
 
 2011-04-25 - 0.1
 * first release
-
+2011-04-26 - 0.2
+* fix issue when on client auth event
+2011-04-26 - 0.3
+* check game compatibility on startup
 
 
 Support
