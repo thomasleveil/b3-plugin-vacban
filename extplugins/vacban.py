@@ -22,9 +22,10 @@
 # * first release
 # 2011-04-26 - 0.2
 # * fix issue when on client auth event
-#
+# 2011-04-26 - 0.3
+# * check game compatibility on startup
 
-__version__ = '0.2'
+__version__ = '0.3'
 __author__  = 'Courgette'
 
 
@@ -43,6 +44,8 @@ except ImportError, err:
 
 USER_AGENT =  "B3 VACban plugin/%s" % __version__
 SERVICE_URL = "http://steamcommunity.com/profiles/"
+
+SUPPORTED_PARSERS = ['homefront']
 
 #--------------------------------------------------------------------------------------------------
 class VacbanPlugin(b3.plugin.Plugin):
@@ -90,6 +93,11 @@ class VacbanPlugin(b3.plugin.Plugin):
 
 
     def onStartup(self):
+        if self.console.gameName not in SUPPORTED_PARSERS:
+            self.error("This game is not supported by this plugin")
+            self.disable()
+            return
+
         self.registerEvent(EVT_CLIENT_AUTH)
 
         self._workerThread = threading.Thread(target=self._worker)
