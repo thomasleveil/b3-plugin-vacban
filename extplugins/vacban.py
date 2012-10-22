@@ -16,25 +16,16 @@
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #
-# Changelog:
 #
-# 2011-04-25 - 0.1
-# * first release
-# 2011-04-26 - 0.2
-# * fix issue when on client auth event
-# 2011-04-26 - 0.3
-# * check game compatibility on startup
+import threading, Queue
+import urllib2 
+import b3.plugin
+from b3.events import EVT_CLIENT_AUTH, EVT_STOP
 
-__version__ = '0.3'
+__version__ = '1.0'
 __author__  = 'Courgette'
 
 
-import time
-import threading, Queue
-import urllib2 
-
-import b3.plugin
-from b3.events import EVT_CLIENT_AUTH
 
 from xml.parsers.expat import ExpatError
 try:
@@ -45,22 +36,22 @@ except ImportError, err:
 USER_AGENT =  "B3 VACban plugin/%s" % __version__
 SERVICE_URL = "http://steamcommunity.com/profiles/"
 
-SUPPORTED_PARSERS = ['homefront']
+SUPPORTED_PARSERS = ['homefront', 'ravaged']
 
 #--------------------------------------------------------------------------------------------------
 class VacbanPlugin(b3.plugin.Plugin):
     _adminPlugin = None
-    _workerThread = None
-    _checkqueue = Queue.Queue()
+    _workerThread = None # thread consumming the _checkqueue
+    _checkqueue = Queue.Queue() # Queue containing Client objects to check against Valve AntiCheat webservice
+    _checkqueue_end_token = object() # special token to put into _checkqueue to tell the _workerThread to stop
     _message_method = None
 
+
     def onLoadConfig(self):
-        # get the admin plugin
         self._adminPlugin = self.console.getPlugin('admin')
         if not self._adminPlugin:
-            # something is wrong, can't start without admin plugin
             self.error('Could not find admin plugin')
-            return False
+            return
 
         # register our commands
         if 'commands' in self.config.sections():
@@ -76,6 +67,30 @@ class VacbanPlugin(b3.plugin.Plugin):
                     self._adminPlugin.registerCommand(self, cmd, level, func, alias)
 
         # load preferences
+        self.load_config_preferences()
+
+
+    def onStartup(self):
+        if self.console.gameName not in SUPPORTED_PARSERS:
+            self.error("This game is not supported by this plugin")
+            self.disable()
+            return
+        self.registerEvent(EVT_CLIENT_AUTH)
+        self._workerThread = threading.Thread(target=self._worker)
+        self._workerThread.setDaemon(True)
+        self._workerThread.start()
+        self._checkConnectedPlayers()
+
+
+
+    ###############################################################################################
+    #
+    #    config loaders
+    #
+    ###############################################################################################
+
+    def load_config_preferences(self):
+        self._message_method = self.debug
         try:
             msgtype = self.config.get('preferences', 'message_type')
             if msgtype.lower() == 'normal':
@@ -89,28 +104,44 @@ class VacbanPlugin(b3.plugin.Plugin):
                 self.info("message_type is : none")
         except Exception, err:
             self.warning('cannot read preferences/message_type from config file (%s)', err)
-            
 
 
-    def onStartup(self):
-        if self.console.gameName not in SUPPORTED_PARSERS:
-            self.error("This game is not supported by this plugin")
-            self.disable()
-            return
 
-        self.registerEvent(EVT_CLIENT_AUTH)
-
-        self._workerThread = threading.Thread(target=self._worker)
-        self._workerThread.setDaemon(True)
-        self._workerThread.start()
-
-        self._checkConnectedPlayers()
-
+    ###############################################################################################
+    #
+    #    event handlers
+    #
+    ###############################################################################################
 
     def onEvent(self, event):
         if event.type == EVT_CLIENT_AUTH:
             self._checkqueue.put(event.client)
+        elif event.type == EVT_STOP:
+            self.stop_worker()
 
+
+
+    ###############################################################################################
+    #
+    #    commands
+    #
+    ###############################################################################################
+
+    def cmd_vaccheck(self, data=None, client=None, cmd=None):
+        """\
+        check all players for VAC ban
+        """
+        if client is not None: client.message("checking players ...")
+        self._checkConnectedPlayers()
+        if client is not None: client.message("done")
+
+
+
+    ###############################################################################################
+    #
+    #    Other methods
+    #
+    ###############################################################################################
 
     def _getCmd(self, cmd):
         cmd = 'cmd_%s' % cmd
@@ -120,54 +151,58 @@ class VacbanPlugin(b3.plugin.Plugin):
         return None
 
 
-
-    def cmd_vaccheck(self, data=None, client=None, cmd=None):
-        """\
-        check all players for VAC ban
-        """
-        if client is not None: client.message("checking players ...")
-        self._checkConnectedPlayers()
-        if client is not None: client.message("done")
-        
-        
-
     def _checkConnectedPlayers(self):
         self.info("checking all connected players")
         clients = self.console.clients.getList()
         for c in clients:
             self._checkqueue.put(c)
 
+
     def _worker(self):
         while self.working:
-            client = self._checkqueue.get()
+            try:
+                client = self._checkqueue.get(timeout=5)
+            except Queue.Empty:
+                continue
+            if client == self._checkqueue_end_token:
+                break
             self._checkClient(client)
+
+
+    def stop_worker(self):
+        self._checkqueue.put(self._checkqueue_end_token)
+
             
     def _checkClient(self, client):
         """\
         Examine players steam community id and allow/deny connection.
         """
         self.debug('checking %s (%s)', client, client.guid)
-        response = self._query_service(client.guid)
-        #self.debug("response : %s", response)
-        if response:
-            try:
-                xml = ElementTree.XML(response)
-                error = xml.findtext('./error', None)
-                if error:
-                    self.warning("Steam answered with error : %s", error)
-                else:
-                    bandata = xml.findtext('./vacBanned', None)
-                    if bandata is None:
-                        self.info("cannot tell if banned. received : %s" % response)
-                    elif bandata == '0':
-                        self.info("%s has no VAC ban", client.name)
-                    elif bandata == '1':
-                        self.info("%s (%s) is banned by VAC", client.name, client.guid)
-                        self._takeActionAgainst(client)
-            except ExpatError, e:
-                self.error(e)
+        try:
+            response = self._query_service(client.guid)
+        except Exception, err:
+            self.exception(err)
         else:
-            self.warning("no response from VAC")
+            if response:
+                try:
+                    xml = ElementTree.XML(response)
+                    error = xml.findtext('./error', None)
+                    if error:
+                        self.warning("Steam answered with error : %s", error)
+                    else:
+                        bandata = xml.findtext('./vacBanned', None)
+                        if bandata is None:
+                            self.info("cannot tell if banned. received : %s" % response)
+                        elif bandata == '0':
+                            self.info("%s has no VAC ban", client.name)
+                        elif bandata == '1':
+                            self.info("%s (%s) is banned by VAC", client.name, client.guid)
+                            self._takeActionAgainst(client)
+                except ExpatError, e:
+                    self.error(e)
+            else:
+                self.warning("no response from VAC")
+
 
     def _query_service(self, uid):
         url = "%s/%s/?xml=1" % (SERVICE_URL.rstrip('/'), uid)
@@ -184,20 +219,25 @@ class VacbanPlugin(b3.plugin.Plugin):
             fp.close()
 
 
+    def _make_message_for(self, client):
+        return self.getMessage('ban_message', self.console.getMessageVariables(self.console, client=client))
+
 
     def _takeActionAgainst(self, client):
         client.kick('VAC BANNED [%s]' % client.name, keyword="VACBAN", silent=True)
         try:
-            msg = self.getMessage('ban_message', b3.parser.Parser.getMessageVariables(self.console, client=client))
+            msg = self._make_message_for(client)
             if msg and msg!="":
                 self._message_method(msg)
         except b3.config.ConfigParser.NoOptionError, err:
             self.warning("could not find message ban_message in config file")
-        
+
+
+
 
 if __name__ == '__main__':
 
-    from b3.fake import fakeConsole, superadmin, joe, moderator
+    from b3.fake import fakeConsole
     conf1 = b3.config.XmlConfigParser()
     conf1.loadFromString("""
     <configuration plugin="vacban">
@@ -224,65 +264,9 @@ if __name__ == '__main__':
         </settings>
     </configuration>
     """)
-    
-    def testCommand():
-        p = VacbanPlugin(fakeConsole, conf1)
-        p.onStartup()
-        superadmin.connects(0)
-        moderator._guid = "76561197968575517"
-        moderator.connects(2)
-        joe._guid = "76561197976827962"
-        joe.connects(1)
-        superadmin.says('!vaccheck')
-        time.sleep(60)
 
-    
-    def test_query():
-        p = VacbanPlugin(fakeConsole, conf1)
-        print(p._query_service("76561198011361489"))
-        print(p._query_service("xxx"))
-        
-        
-    
-    def test_checkClient():
-        p = VacbanPlugin(fakeConsole, conf1)
-        p.onStartup()
-        joe._guid = "76561197976827962"
-        time.sleep(5)
-        print(p._checkClient(joe))
-        time.sleep(10)
-        
-    
-    def test_lots_of_clients():
-        from b3.fake import FakeClient
-        p = VacbanPlugin(fakeConsole, conf1)
-        p.onStartup()
-        players = []
-        for i in range(0, 32):
-            client = FakeClient(fakeConsole, guid='someguid-%s'%i, name='name-%s'%i, authed=True)
-            players.append(client)
-            client.connects(i)
-            time.sleep(2)
-            
-        client._guid = "76561197976827962"
-        print("-----------------------------------------")
-        moderator.connects(444)
-        p.cmd_vaccheck(client=moderator)
-        
-        time.sleep(60)
-    
-        
-    def test_client_auth():
-        p = VacbanPlugin(fakeConsole, conf1)
-        p.onStartup()
-        joe._guid = "76561197976827962"
-        time.sleep(3)
-        print('- * '*20)
-        joe.connects(2)
-        time.sleep(10)
-        
-    #testCommand()
-    #test_query()
-    #test_checkClient()
-    #test_lots_of_clients()
-    test_client_auth()
+    p = VacbanPlugin(fakeConsole, conf1)
+    print(p._query_service("76561198011361489"))
+    print(p._query_service("76561198016545586"))
+    print(p._query_service("xxx"))
+
